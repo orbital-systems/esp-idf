@@ -102,6 +102,9 @@ struct esp_tls {
     esp_tls_dyn_buf_strategy_t esp_tls_dyn_buf_strategy;                        /*!< ESP-TLS dynamic buffer strategy */
 #endif
 
+#ifdef CONFIG_ATECC608A_RUNTIME_SELECTION
+    uint8_t atecc608a_i2c_addr;                                                 /*!< I2C address of the ATECC608A device */
+#endif // CONFIG_ATECC608A_RUNTIME_SELECTION
 };
 
 // Function pointer for the server configuration API
