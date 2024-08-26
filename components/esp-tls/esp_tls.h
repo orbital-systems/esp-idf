@@ -238,6 +238,9 @@ typedef struct esp_tls_cfg {
     esp_tls_dyn_buf_strategy_t esp_tls_dyn_buf_strategy; /*!< ESP-TLS dynamic buffer strategy */
 #endif
 
+#ifdef CONFIG_ATECC608A_RUNTIME_SELECTION
+    uint8_t atecc608a_i2c_addr;            /*!< I2C address of the atecc608a chip */
+#endif // CONFIG_ATECC608A_RUNTIME_SELECTION
 } esp_tls_cfg_t;
 
 #if defined(CONFIG_ESP_TLS_SERVER_SESSION_TICKETS)
@@ -355,6 +358,10 @@ typedef struct esp_tls_cfg_server {
     esp_tls_handshake_callback cert_select_cb;  /*!< Certificate selection callback that gets called after ClientHello is processed.
                                                      Can be used as an SNI callback, but also has access to other
                                                      TLS extensions, such as ALPN and server_certificate_type . */
+#endif
+
+#if defined(CONFIG_ATECC608A_RUNTIME_SELECTION)
+    uint8_t atecc608a_i2c_addr;                 /*!< I2C address of the atecc608a chip */
 #endif
 
 #if defined(CONFIG_ESP_TLS_PSK_VERIFICATION)
