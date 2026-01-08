@@ -67,7 +67,7 @@
 
 [submodule "components/mqtt/esp-mqtt"]
 	path = components/mqtt/esp-mqtt
-	url = ../../espressif/esp-mqtt.git
+	url = https://github.com/orbital-systems/esp-mqtt.git
 
 [submodule "components/protobuf-c/protobuf-c"]
 	path = components/protobuf-c/protobuf-c
