@@ -90,6 +90,7 @@ typedef struct {
     atomic_bool rx_isr;
     const twai_frame_t *p_curr_tx[TWAI_HAL_TX_BUFFER_SLOT_NUM];
     twai_hal_frame_t rcv_buff;
+    portMUX_TYPE spinlock;  // serializes the task-side transmit start against the ISR, see esp-idf#19068
 } twai_onchip_ctx_t;
 
 typedef struct twai_platform_s {
@@ -241,6 +242,7 @@ static void _node_isr_main(void *arg)
 {
     BaseType_t do_yield = pdFALSE;
     twai_onchip_ctx_t *twai_ctx = arg;
+    portENTER_CRITICAL_ISR(&twai_ctx->spinlock);
     uint32_t events = twai_hal_get_events(twai_ctx->hal);    //Get the events that triggered the interrupt
 
 #if CONFIG_IDF_TARGET_ESP32 // only esp32 have this errata, TODO: IDF-13002 check errata runtime
@@ -339,6 +341,7 @@ static void _node_isr_main(void *arg)
             }
         }
     }
+    portEXIT_CRITICAL_ISR(&twai_ctx->spinlock);
 
     if (do_yield) {
         portYIELD_FROM_ISR();
@@ -508,6 +511,7 @@ static esp_err_t _node_enable(twai_node_handle_t node)
     twai_error_state_t hw_state = twai_hal_get_err_state(twai_ctx->hal);
     atomic_store(&twai_ctx->state, hw_state);
     // continuing the transaction if there be
+    portENTER_CRITICAL(&twai_ctx->spinlock);
     if (atomic_load(&twai_ctx->hw_busy) && hw_state != TWAI_ERROR_BUS_OFF) {
         for (uint8_t tx_idx = 0; tx_idx < twai_ctx->tx_slot_num; tx_idx++) {
             if (twai_ctx->p_curr_tx[tx_idx]) {
@@ -515,6 +519,7 @@ static esp_err_t _node_enable(twai_node_handle_t node)
             }
         }
     }
+    portEXIT_CRITICAL(&twai_ctx->spinlock);
     ESP_RETURN_ON_ERROR(esp_intr_enable(twai_ctx->intr_hdl), TAG, "enable interrupt failed");
     return ESP_OK;
 }
@@ -591,7 +596,9 @@ static esp_err_t _node_recover(twai_node_handle_t node)
 
     // After recover command, the hardware require 128 consecutive occurrences of 11 recessive bits received, so that it can be active again!
     // Checking `twai_node_status_t::state` Or waiting `on_state_change` callback can know if recover is finish
+    portENTER_CRITICAL(&twai_ctx->spinlock);
     twai_hal_start_bus_recovery(twai_ctx->hal);
+    portEXIT_CRITICAL(&twai_ctx->spinlock);
     twai_ctx->history.bus_err_num = 0;
     return ESP_OK;
 }
@@ -631,15 +638,20 @@ static esp_err_t _node_queue_tx(twai_node_handle_t node, const twai_frame_t *fra
 
     xEventGroupClearBits(twai_ctx->event_group, TWAI_IDLE_EVENT_BIT); //going to send, clear the idle event
     bool false_var = false;
-    if (atomic_compare_exchange_strong(&twai_ctx->hw_busy, &false_var, true)) {
+    portENTER_CRITICAL_SAFE(&twai_ctx->spinlock);
+    bool started = atomic_compare_exchange_strong(&twai_ctx->hw_busy, &false_var, true);
+    if (started) {
         twai_ctx->p_curr_tx[0] = frame; // here only has one frame, using slot 0
         _node_start_trans(twai_ctx, 0);
-    } else {
-        // Hardware busy, need to queue the frame
+    }
+    portEXIT_CRITICAL_SAFE(&twai_ctx->spinlock);
+    if (!started) {
+        // Hardware busy, need to queue the frame. The enqueue may block, so it stays outside the lock
         ESP_RETURN_ON_ERROR_ISR(twai_frame_queue_push_safe(twai_ctx->tx_queue, frame, frame->tx_queue_priority, timeout), TAG, "tx queue full");
 
-        // Second chance check for hardware availability
+        // Second chance check for hardware availability, atomic with the ISR's own dequeue-or-release
         false_var = false;
+        portENTER_CRITICAL_SAFE(&twai_ctx->spinlock);
         if (atomic_compare_exchange_strong(&twai_ctx->hw_busy, &false_var, true)) {
             if (twai_frame_queue_pop_safe(twai_ctx->tx_queue, &twai_ctx->p_curr_tx[0]) == ESP_OK) {
                 _node_start_trans(twai_ctx, 0);
@@ -648,6 +660,7 @@ static esp_err_t _node_queue_tx(twai_node_handle_t node, const twai_frame_t *fra
                 atomic_store(&twai_ctx->hw_busy, false);
             }
         }
+        portEXIT_CRITICAL_SAFE(&twai_ctx->spinlock);
     }
     return ESP_OK;
 }
@@ -716,6 +729,7 @@ esp_err_t twai_new_node_onchip(const twai_onchip_node_config_t *node_config, twa
     ESP_GOTO_ON_FALSE(ctrlr_id != -1, ESP_ERR_NOT_FOUND, err, TAG, "Controller not available");
     node->ctrlr_id = ctrlr_id;
     node->hal = (twai_hal_context_t *)(node + 1);   //hal context is place at end of driver context
+    portMUX_INITIALIZE(&node->spinlock);
     node->curr_clk_src = node_config->clk_src ? node_config->clk_src : TWAI_CLK_SRC_DEFAULT;
     node->enable_scheduled_tx = node_config->flags.enable_scheduled_tx;
     ESP_GOTO_ON_ERROR(esp_clk_tree_src_get_freq_hz(node->curr_clk_src, ESP_CLK_TREE_SRC_FREQ_PRECISION_APPROX, &node->src_freq_hz), err, TAG, "get clock source frequency failed");
